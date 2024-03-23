@@ -1,28 +1,28 @@
 import asyncio
 import os
-import sqlite3
 
 import aiohttp
+import motor.motor_asyncio
 from aiogram import Bot
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.telegram import TelegramAPIServer
 from aiogram.types import FSInputFile
-
+from bs4 import BeautifulSoup
 from selenium import webdriver
 from selenium.webdriver import FirefoxOptions
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.wait import WebDriverWait
 
-"""Можно заменить на selenium, но selenium - это ******. Это не жрет много ваших ресурсы"""
-from bs4 import BeautifulSoup
-"""----------------------------------------------------------------------------------------"""
+BOT_TOKEN = "" # Токен бота
 
-BOT_TOKEN = ""
+API_SERVER_IP = "127.0.0.1:8081" # ip адрес API сервера telegram
 
-API_SERVER_IP = "127.0.0.1:8081"
+CHAT_ID = 0 # id чата для отправки серий
 
-CHAT_ID = 0
+mongo_url = "" # Ссылка на подключение к mongodb
+claster_name = "" # имя кластера, к которому подключаетесь
+db_name = "" # название базы данных, в которую будут записываться аниме
 
 """Нужен, чтобы загружать файлы больших размеров в телеграм. Можно убрать"""
 session = AiohttpSession(
@@ -31,9 +31,8 @@ session = AiohttpSession(
 
 bot = Bot(token=BOT_TOKEN, parse_mode="HTML", session=session)
 
-conn = sqlite3.connect('database.db', check_same_thread=False)
-cursor = conn.cursor()
-
+database = motor.motor_asyncio.AsyncIOMotorClient(mongo_url)["db_name"]
+animaunt_db = database[db_name]
 
 async def animaunt_series(bot):
     session = aiohttp.ClientSession()
@@ -44,12 +43,10 @@ async def animaunt_series(bot):
         soup = BeautifulSoup(await response.text(), "lxml")
         for element in soup.findAll("a", class_="th-img img-resp-v with-mask")[:10]:
             anime_name = element.img.get("alt")
-            cursor.execute("SELECT * FROM animaunt WHERE anime_name=?", (anime_name,))
-            existing_record = cursor.fetchone()
 
-            if not existing_record:
-                cursor.execute("INSERT INTO animaunt (anime_name, url) VALUES (?, ?)", (anime_name, url))
-                conn.commit()
+            if not await animaunt_db.find_one({"name": anime_name}):
+                await animaunt_db.insert_one({"name": anime_name, "series": {}})
+
             driver.get(element.get("href"))
 
             try:
@@ -62,14 +59,12 @@ async def animaunt_series(bot):
 
             temp_list = []
 
-            """У меня была mongodb. Под sqlite нужно переписать!!! (Мне лень было переписывать)"""
-            finded = await animauntdb.find_one({"anime_name": anime_name})
+            finded = await animaunt_db.find_one({"anime_name": anime_name})
 
             if finded["series"]:
                 last_db_series = list(finded["series"].keys())[-1]
             else:
                 last_db_series = series_list[-1].text
-            """--------------------------------------------------------------------------------"""
 
             for butt_name in series_list:
                 temp_list.append(butt_name.text)
@@ -116,9 +111,6 @@ async def animaunt_series(bot):
 
                 file.close()
 
-                """msg для того, чтобы можно было достать file_id из сообщения для дальнейшего использования. Я записывал это в БД и хотел сделать бота 
-                по типу @animevost_org_bot. Не реализовал, но в планах было"""
-
                 msg = await bot.send_video(CHAT_ID,
                                            video=FSInputFile(file_name),
                                            caption=f"{anime_name} ({series_num_text})",
@@ -129,10 +121,8 @@ async def animaunt_series(bot):
                                            request_timeout=600
                                            )
 
-                """Тут должно быть добавление серии в базу данных. Базу прикручивайте сами. У меня была mongo, можно использовать sqlite, 
-                под который я все переделывал. Я записывал в базу название (номер серии_ и file_id, потому что хотел сделать полноценного бота,
-                который бы присывал видео"""
-
+                await animaunt_db.update_one({"name": anime_name},
+                                             {"$set": {f"series.{series_num_text}": msg.video.file_id}})
                 os.remove(file_name)
 
     driver.close()
